@@ -1,0 +1,768 @@
+"use strict";
+
+/**
+ * @constructor Registry
+ *
+ * These are helper functions specifically meant to save items on the patient registry questionnaire.
+ *
+ * @returns {function} init() Our initialization function
+ */
+function Registry() {
+  // The string of the active page (which corresponds with contentDictionary)
+  var activeQuestionnairePage = "";
+  const endpoint = "https://patient-registry.clinical.neuralink.com";
+  var questionnaireContent;
+  const pageNameConsent = "Informed Consent and Medical Records Release Authorization";
+
+  // ---------------------------------------------------------------
+  // All pages & their companion .json file with metadata
+  const contentDictionary = {
+    "Screener": '/data/screenerQuestionnaire.json',
+    [pageNameConsent]: '/data/preconsentQuestionnaire.json',
+    "Personal Information": '/data/personalInfoQuestionnaire.json',
+    "Health Information": '/data/healthInfoQuestionnaire.json'
+  };
+  const validators = {
+    "CONSENT-ParticipantPNumber-r001": checkPhone,
+    "CONSENT-LARPNumber-r001": checkPhone,
+    "CONTACT-Zipcode-r001": checkNumericalCharacters,
+    "CONSENT-RecordPtPNumber-r001": checkPhone,
+    "CONSENT-PrimaryProviderPNumber-r001": checkPhone,
+    "CONSENT-PrimaryProviderZipcode-r001": checkNumericalCharacters,
+    "CONSENT-SecondaryProviderPNumber-r001": checkPhone,
+    "CONSENT-SecondaryProviderZipcode-r001": checkNumericalCharacters,
+    "BASICHEALTH-HeightFeet-r001": checkNumericalCharacters,
+    "BASICHEALTH-HeightInches-r001": checkNumericalCharacters,
+    "BASICHEALTH-Weight-r001": checkNumericalCharacters,
+    "BASICHEALTH-ExercisePerDay-r001": checkNumericalCharacters,
+    "PSYCHHISTORY-DepressionTreatmentStart-r001": checkNumericalCharacters,
+    "CONSENT-RecordPtDOB-r001": checkBirthday,
+    "PSYCHHISTORY-DepressionTreatmentStart-r001": checkYearRange,
+    "CONSENT-PrimaryProviderState-r001": checkStateCode,
+    "CONSENT-SecondaryProviderState-r001": checkStateCode,
+    "CONTACT-State-r001": checkStateCode,
+    "SIGNATURE-ConsentSignature-r001": checkText,
+    "SIGNATURE-RecordReleaseSignature-r001": checkText,
+    "CONTACT-City-r001": checkText,
+    "SIGNATURE-ConsentFullName-r001": checkText,
+    "CONSENT-RecordPtFName-r001": checkText,
+    "CONSENT-RecordPtLName-r001": checkText,
+    "CONSENT-PrimaryProviderName-r001": checkText,
+    "CONSENT-PrimaryProviderCity-r001": checkText,
+    "CONSENT-SecondaryProviderName-r001": checkText,
+    "CONSENT-SecondaryProviderCity-r001": checkText,
+    "SIGNATURE-RecordReleaseFullName-r001": checkText,
+    "SIGNATURE-LarRelationsConsent-r001": checkText,
+    "SIGNATURE-LarRelationsRelease-r001": checkText,
+    "BASICHEALTH-AdditionalMedicalConditions-r001": checkText,
+    "MISCHEALTH-AdditionalMedicalInfo-r001": checkText,
+    "NEURO-NeurologicalDetails-r001": checkText,
+    "MISCHEALTH-MedicationAllergies-r001": checkText,
+    "PSYCHHISTORY-AltPsychDisorderTreatment-r001": checkText,
+    "ASSISTIVE-OtherAssistToolDescription-r001": checkText,
+    "ASSISTIVE-PainPoints-r001": checkText,
+    "ASSISTIVE-Limitations-r001": checkText,
+    "ASSISTIVE-ApplicationWants-r001": checkText
+  };
+
+  // ---------------------------------------------------------------
+  // Takes an item, and saves the value to local storage in correspondance
+  // with the custom template item it is.
+  function saveItemValue(eventTarget) {
+    let eventParent = eventTarget.closest('fieldset');
+    if (eventTarget.type == undefined && eventTarget.querySelector("input[type=checkbox]") != null) {
+      // This is a checkbox wrapped in a label. the event target will show as
+      // undefined, but the checkbox must be within a label to increase the touch
+      // target and accessibility of it.
+      let checkboxElement = eventTarget.querySelector("input[type=checkbox]");
+      if (checkboxElement.checked) {
+        localStorage.setItem(eventTarget.id, "Yes");
+      } else if (checkboxElement.checked == false) {
+        localStorage.setItem(eventTarget.id, "No");
+      }
+      return;
+    }
+
+    // radio buttons / one answer
+    if (eventTarget.type == "radio") {
+      localStorage.setItem(eventParent.id, eventTarget.value);
+      return;
+      // checkboxes/ multiple answers
+    }
+
+    // no fieldset == text/date
+    if (!eventParent) {
+      localStorage.setItem(eventTarget.id, eventTarget.value);
+      validateEntries(eventTarget);
+      return;
+    }
+    let valueItems = localStorage.getItem(eventParent.id);
+    valueItems = valueItems ? valueItems.split(',') : [];
+    if (eventTarget.checked) {
+      valueItems.push(eventTarget.value);
+      // if someone unchecks it, remove from storage
+    } else if (!eventTarget.checked && valueItems.includes(eventTarget.value)) {
+      valueItems = valueItems.filter(e => e !== eventTarget.value);
+    }
+    localStorage.setItem(eventParent.id, valueItems.toString());
+  }
+
+  // ---------------------------------------------------------------
+  // Takes an item from local storage, and updates the UI component to load
+  // the previously entered value.
+  function loadItemValue(item) {
+    let itemValue = localStorage.getItem(item.id);
+    let element = document.getElementById(item.id);
+    if (itemValue) {
+      if (item.templateName == 'yesNoSelectionItem' || item.templateName == 'agreeCheckboxItem' || item.templateName == 'labeledCheckbox') {
+        // if item is yes then check yes radio on yes input
+        let input = document.querySelector(`input[value="${itemValue}"][id*="${element.id}"]`);
+        input.checked = true;
+      } else if (!item.items) {
+        validateEntries(element);
+        element.value = itemValue;
+      } else {
+        let itemList = itemValue.split(',');
+        if (itemList.length == 1) {
+          item.items.forEach(e => {
+            if (e == itemValue) {
+              let input = document.querySelector(`input[value="${e}"]`);
+              input.checked = true;
+            }
+          });
+        } else {
+          itemList.forEach(e => {
+            let input = document.querySelector(`input[value="${e}"]`);
+            input.checked = true;
+          });
+        }
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // A general base function used to check for items that haven't been filled out
+  // or selected.
+  async function getNullFields(url) {
+    const body = {};
+    let response = await fetch(url);
+    let data = await response.json();
+
+    // Goes through the data and makes sure to only look for items that are user interactive
+    // This makes sure decorative items / text doesn't show up and cause bugs.
+    await data.items.forEach(item => {
+      if ((item.templateName == "textField" || item.templateName == "textView" || item.templateName == "checkBoxMenuItem" || item.templateName == "labeledCheckbox" || item.templateName == "selectionGrouping" || item.templateName == "yesNoSelectionItem" || item.templateName == "agreeCheckboxItem") && (localStorage.getItem(item.id) == null || localStorage.getItem(item.id) == "undefined") && item.required == "Yes") {
+        body[item.id] = localStorage.getItem(item.id);
+      }
+    });
+    return body;
+  }
+
+  // ---------------------------------------------------------------
+  // Formats the page body requested from a .json file
+  async function getPageBody(url) {
+    const body = {};
+    let response = await fetch(url);
+    let pageData = await response.json();
+    pageData.items.forEach(item => {
+      if (item != "undefined" && localStorage.getItem(item.id) != null && localStorage.getItem(item.id) != "undefined") {
+        body[item.id] = localStorage.getItem(item.id);
+      }
+    });
+    return body;
+  }
+
+  // ---------------------------------------------------------------
+  // Retrieves the ENTIRE application body across the questionnaire.
+  async function getApplicationBody() {
+    let pageData;
+    let appBody = {};
+    try {
+      pageData = await fetchPageData(contentDictionary);
+      pageData.forEach(page => {
+        page.items.forEach(item => {
+          if (item != undefined && localStorage.getItem(item.id) != null) {
+            appBody[item.id] = localStorage.getItem(item.id);
+          }
+        });
+      });
+    } catch (e) {
+      console.error(e);
+    }
+    return appBody;
+  }
+
+  // ---------------------------------------------------------------
+  // Creates a promise of all .json page data from the contentDictionary
+  function fetchPageData(contentDictionary) {
+    const pages = Object.values(contentDictionary);
+    return Promise.all(pages.map(page => fetch(page).then(r => r.json()).catch(err => ({
+      err,
+      page
+    }))));
+  }
+  async function submitRequest(path, request) {
+    const url = `${endpoint}${path}`;
+    const recaptchaCode = grecaptcha.getResponse();
+    if (recaptchaCode.length == 0) {
+      return null;
+    }
+    const config = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Recaptcha-Response': recaptchaCode
+      },
+      body: JSON.stringify(request)
+    };
+    try {
+      // fetch itself could fail due to network or server error
+      const res = await fetch(url, config);
+      if (!res.ok) {
+        return null;
+      }
+      const json = await res.json();
+      return json;
+    } catch (e) {
+      console.log(`HTTP error: ${e}`);
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Creates an application body of the consent page only, and sends it
+  // to the back-end as the mid-way save point.
+  async function submitConsent(page) {
+    return submitRequest('/consent', await getPageBody(page));
+  }
+
+  // ---------------------------------------------------------------
+  // Creates an application body of the entire questionnaire, and sends it
+  // to the back-end after submission confirmation.
+  async function postApplication() {
+    return submitRequest('/submission', await getApplicationBody());
+  }
+
+  // ---------------------------------------------------------------
+  // Checks user's eligibility at the end of the screener page.
+  // User needs to:
+  // - be over the age of 18
+  // - within the US
+  // - having one of the conditions that makes someone eligible for the registry
+
+  function checkUserEligibility() {
+    let adult = localStorage.getItem("ELIGIBILITY-AdultStatus-r001");
+    let residency = localStorage.getItem("ELIGIBILITY-USResidency-r001");
+    let diagnosis = localStorage.getItem("ELIGIBILITY-CriteriaDiagnosis-r001");
+    if (adult == "Yes" && residency == "Yes" && diagnosis == "Yes") {
+      // user meets criteria can pass.
+      localStorage.setItem("FLAG-meetsEligibilityCriteria", "true");
+      return true;
+    } else {
+      // user is ineligible, send to state page.
+      localStorage.setItem("FLAG-meetsEligibilityCriteria", "false");
+      localStorage.setItem("FLAG-isApplicationComplete", "true");
+      return false;
+    }
+  }
+  function assertRecaptcha() {
+    const recaptchaCode = grecaptcha.getResponse();
+    if (recaptchaCode.length == 0) {
+      alert("Please complete the reCAPTCHA to continue");
+      const captchaElement = document.getElementById('recaptcha');
+      captchaElement.scrollIntoView();
+      captchaElement.focus();
+      return false;
+    } else {
+      return true;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Checks user's signature to make sure they filled out the consent
+  // form, and then sets the proper flags.
+
+  async function checkUserConsent(url) {
+    let finalSignature = localStorage.getItem('SIGNATURE-RecordReleaseSignature-r001');
+    if (finalSignature != null || finalSignature != undefined) {
+      //making sure the user has formally signed before submitting the consent
+      //form and marking their application with a "true" flag
+      if (!assertRecaptcha()) {
+        localStorage.setItem("FLAG-isConsentGiven", "false");
+        return false;
+      }
+      let res = await submitConsent(url);
+      if (res === null) {
+        // TODO: replace this with a proper error page
+        alert("Failed to submit consent, please refresh and retry later.");
+        return false;
+      } else {
+        localStorage.setItem("FLAG-isConsentGiven", "true");
+        window.location.href = "/patient-registry/personal-info/";
+        return true;
+      }
+    } else {
+      localStorage.setItem("FLAG-isConsentGiven", "false");
+      window.location.href = "/patient-registry/submission-state/";
+      return false;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Iterates through the null fields in the given page and focuses on
+  // them for the user to complete them.
+
+  async function validateInput() {
+    const nullInputs = await getNullFields(contentDictionary[activeQuestionnairePage]);
+
+    // Checks to make sure that there are null fields
+    if (Object.keys(nullInputs).length != 0) {
+      // There are null fields, don't let the user proceed.
+
+      //alert("One or more required items hasn't been filled out. Make a selection and try again.");
+
+      await fetch(contentDictionary[activeQuestionnairePage]).then(response => {
+        return response.json();
+      }).then(response => {
+        var index = 0;
+        var focusElement;
+        response.items.forEach(item => {
+          let textID = item.id + '-errortext';
+          if (item.templateName == "yesNoSelectionItem" && item.required == "Yes") {
+            let inputSelector = "input[name='" + item.id + "-boolean']:checked";
+            if (document.querySelectorAll(inputSelector).length == 0) {
+              index += 1;
+
+              // FAILED VALIDATION
+
+              // only focusing on first iteration
+              if (index == 1) {
+                focusElement = item.id;
+              }
+              if (document.getElementById(textID) == undefined || document.getElementById(item.id + '-errortext') == null) {
+                // Create a temporary <div> that puts text underneath the not-filled item.
+                var errorText = document.createElement('p');
+                errorText.setAttribute('id', textID);
+                errorText.setAttribute('class', 'uncompleted-text-style');
+                errorText.setAttribute('tabindex', '0');
+                errorText.innerHTML = "Please make a selection before moving forward.";
+
+                // Write the <div> to the HTML container
+                document.getElementById(item.id).parentNode.insertBefore(errorText, document.getElementById(item.id));
+              }
+            } else if (document.querySelectorAll(inputSelector).length != 0) {
+              if (document.getElementById(textID) != undefined || document.getElementById(item.id + '-errortext') != null) {
+                let errorTextElement = document.getElementById(textID);
+                errorTextElement.remove();
+              }
+            }
+          }
+          if (item.templateName == "selectionGrouping" && item.required == "Yes") {
+            //No items weres selected. Focus item and return "false"
+
+            let inputSelector = "input[name='" + item.itemName + "']:checked";
+            if (document.querySelectorAll(inputSelector).length == 0) {
+              index += 1;
+              // FAILED VALIDATION
+
+              if (index == 1) {
+                focusElement = item.id;
+              }
+              if (document.getElementById(textID) == undefined || document.getElementById(item.id + '-errortext') == null) {
+                // Create a temporary <div> that puts text underneath the not-filled item.
+                let errorText = document.createElement('p');
+                errorText.setAttribute('id', textID);
+                errorText.setAttribute('class', 'uncompleted-text-style');
+                errorText.setAttribute('tabindex', '0');
+                errorText.innerHTML = "Please make a selection before moving forward.";
+
+                // Write the <div> to the HTML container
+                document.getElementById(item.id).parentNode.insertBefore(errorText, document.getElementById(item.id).nextSibling);
+              }
+            } else if (document.querySelectorAll(inputSelector).length != 0) {
+              if (document.getElementById(textID) != undefined || document.getElementById(item.id + '-errortext') != null) {
+                //Removes left over error message text if the field was prev. not filled, but now is.
+                let errorTextElement = document.getElementById(textID);
+                errorTextElement.remove();
+              }
+            }
+          }
+        });
+        if (focusElement != null) {
+          document.getElementById(focusElement + "-errortext").focus();
+        }
+      }).catch(error => error);
+    } else {
+      // There aren't null fields, let the user proceed.
+      switch (activeQuestionnairePage) {
+        case "Screener":
+          if (checkUserEligibility()) {
+            window.location.href = "/patient-registry/consent/";
+          } else {
+            window.location.href = "/patient-registry/submission-state/";
+          }
+          break;
+        case pageNameConsent:
+          // Makes sure user is signing on the same date that they're submitting the consent form
+          const d = new Date();
+
+          //formats the date into the same format as local storage
+          const date = [d.getFullYear(), ('0' + (d.getMonth() + 1)).slice(-2), ('0' + d.getDate()).slice(-2)].join('-');
+          if (localStorage.getItem("SIGNATURE-RecordReleaseDate-r001") != date) {
+            alert("Please resign the consent form. The forms must be signed on the day they're submitted.");
+            const signatureField = document.getElementById("SIGNATURE-RecordReleaseDate-r001");
+            signatureField.setCustomValidity("Expired Signature.");
+            signatureField.focus();
+          } else {
+            checkUserConsent(contentDictionary[activeQuestionnairePage]);
+          }
+          break;
+        case "Personal Information":
+          window.location.href = "/patient-registry/health-info/";
+          break;
+        case "Health Information":
+          localStorage.setItem("FLAG-isApplicationComplete", "true");
+          window.location.href = "/patient-registry/submission-approval/";
+          break;
+        default:
+          break;
+      }
+      return true;
+    }
+  }
+
+  // actively formats phone number as a user changes it.
+  function formatPhoneNumber(element) {
+    const number = localStorage.getItem(element.id);
+    if (element.checkValidity() == true) {
+      const formattedNumber = number.replace(/(\d{1,2})(\d{1})?(\d{1,3})?(\d{1,4})?/, function (_, p1, p2, p3, p4) {
+        let output = "";
+        if (p1) output = `(${p1}`;
+        if (p2) output += `${p2})`;
+        if (p3) output += ` ${p3}`;
+        if (p4) output += ` ${p4}`;
+        return output;
+      });
+      element.value = formattedNumber;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Removes formatting from a phone number while it's being edited so it doesn't mess up the # count.
+  function removePhoneNumberFormatting(element) {
+    const number = localStorage.getItem(element.id);
+    const unformattedNumber = number.replace(/[^0-9]/g, '');
+    element.value = unformattedNumber;
+  }
+
+  // ---------------------------------------------------------------
+  // Checks a user's birthday to make sure they're over 18 before submittal.
+  function checkBirthday(element) {
+    const elementDate = localStorage.getItem(element.id);
+    let userDate = new Date(elementDate);
+    let currentDate = new Date();
+    const yearDiff = currentDate.getUTCFullYear() - userDate.getUTCFullYear();
+    const monthDiff = currentDate.getUTCMonth() - userDate.getUTCMonth();
+    const dayDiff = currentDate.getUTCDate() - userDate.getUTCDate();
+    const nineteenToOneOhNine = yearDiff > 18 && yearDiff < 110;
+    const olderThanEighteenAndAMonth = yearDiff == 18 && monthDiff > 0;
+    const olderThanEighteenAndADayUTC = yearDiff == 18 && monthDiff == 0 && dayDiff > 0;
+    // Every day, between the hours of 5pm and midnight in California,
+    // we let submissions from participants that are turning 18 today.
+    // We did this to outselves.
+
+    if (nineteenToOneOhNine || olderThanEighteenAndAMonth || olderThanEighteenAndADayUTC) {
+      return;
+    }
+    if (element.hasAttribute('required') == false && element.value.length == 0) {
+      return "You cannot be younger than 18, or older than 110 to submit an application";
+    }
+    return "Invalid field.";
+  }
+
+  // ---------------------------------------------------------------
+  // Makes sure people can't be treated before the 1900's or after the current year.
+  function checkYearRange(element) {
+    const elementDate = parseInt(localStorage.getItem(element.id));
+    const currentYear = new Date().getFullYear();
+    const difference = currentYear - elementDate;
+    if (difference >= 0 && difference < 110) {
+      return;
+    }
+    if (element.hasAttribute('required') == false && element.value.length == 0) {
+      return;
+    }
+    return "The year cannot be more than 110 years in the past, or in the future.";
+  }
+
+  // ---------------------------------------------------------------
+  // Makes sure specific inputs don't accept anything BUT numbers, just the Alphabet (e.g: names / signatures)
+  function checkNumericalCharacters(element) {
+    const elementContent = localStorage.getItem(element.id);
+    const pattern = new RegExp(/^[0-9]*$/);
+    if (pattern.test(elementContent) == true) {
+      return;
+    }
+    if (element.hasAttribute('required') == false && element.value.length == 0) {
+      return "Only numbers are allowed in this field.";
+    } else {
+      return "Invalid field.";
+    }
+  }
+  function checkPhone(element) {
+    const numberErr = checkNumericalCharacters(element);
+    if (element.hasAttribute('required') == false) {
+      return;
+    }
+    if (numberErr !== undefined) {
+      return numberErr;
+    }
+    const elementContent = localStorage.getItem(element.id);
+    if (elementContent.length != 10) {
+      return "Invalid length.";
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Removes special characters, for use in general purpose text when someone is just typing.
+  function checkText(element) {
+    if (element.hasAttribute('required') == false) {
+      return;
+    }
+    const elementContent = localStorage.getItem(element.id);
+    if (elementContent.length != 0) {
+      return;
+    }
+    return "Invalid field.";
+  }
+
+  // ---------------------------------------------------------------
+  // Makes sure specific inputs don't accept numbers, just the Alphabet (e.g: names / signatures)
+  function checkStateCode(element) {
+    const elementContent = localStorage.getItem(element.id).toUpperCase();
+    const stateCodes = ['AL', 'AK', 'AS', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'DC', 'FM', 'FL', 'GA', 'GU', 'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MH', 'MD', 'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'MP', 'OH', 'OK', 'OR', 'PW', 'PA', 'PR', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VI', 'VA', 'WA', 'WV', 'WI', 'WY'];
+    if (stateCodes.includes(elementContent) == true) {
+      return;
+    }
+    if (element.value.length == 0) {
+      if (element.hasAttribute('required') == false) {
+        return;
+      }
+      return "Field required.";
+    }
+    return "The state code you entered does not exist.";
+  }
+
+  // ---------------------------------------------------------------
+  // Makes sure entries getting saved to / pulling from local storage display the proper validation.
+  function validateEntries(element) {
+    var _validators$element$i;
+    const error = validators === null || validators === void 0 ? void 0 : (_validators$element$i = validators[element.id]) === null || _validators$element$i === void 0 ? void 0 : _validators$element$i.call(validators, element);
+    element.setCustomValidity(error ?? "");
+    if (error !== undefined && element.type != "date") {
+      element.reportValidity();
+    }
+  }
+  function updateSubmissionStateText(header, text) {
+    const stateText = document.getElementById("submission-state-text");
+    const stateHeader = document.getElementById("submission-state-header");
+    stateHeader.innerHTML = header;
+    stateText.innerHTML = text;
+  }
+  function submitApplication(e) {
+    e.preventDefault();
+    if (!assertRecaptcha()) {
+      return;
+    }
+    const isUserEligible = localStorage.getItem("FLAG-meetsEligibilityCriteria");
+    const isApplicationComplete = localStorage.getItem("FLAG-isApplicationComplete");
+    const isConsentGiven = localStorage.getItem("FLAG-isConsentGiven");
+    localStorage.removeItem("FLAG-submissionSuccess");
+    if (isUserEligible == "true" && isApplicationComplete == "true" && isConsentGiven == "true") {
+      // User has been added to patient registry, show eligible copy.
+      postApplication().then(ret => {
+        if (ret === null) {
+          localStorage.setItem("FLAG-submissionSuccess", "false");
+        } else {
+          // clear all locally stored data after a successfull submission
+          localStorage.clear();
+          localStorage.setItem("FLAG-submissionSuccess", "true");
+        }
+        window.location.href = "/patient-registry/submission-state/";
+      });
+    } else {
+      // redirect to submission state page to display the proper message
+      window.location.href = "/patient-registry/submission-state/";
+    }
+  }
+
+  /**
+   * @function init
+   *
+   * Initializes all of our helper functions for the patient registrt pages
+   */
+  const init = function () {
+    window.addEventListener('load', function () {
+      // Makes sure the page is a questionnaire container before adding event listeners.
+      if (document.getElementsByClassName("questionnaireContainer").length > 0) {
+        // 1) Finds which page is active -----------------------------
+        let headerContent = document.querySelectorAll('h2');
+        let name = "";
+        if (headerContent.length > 0) {
+          name = headerContent.item(0).innerText;
+          if (contentDictionary.hasOwnProperty(name) == true) {
+            activeQuestionnairePage = name;
+          }
+        }
+
+        // 2) Checks to see if the user has given consent before accesssing
+        // later stages of the questionnaire
+        // -----------------------------
+        if (name == pageNameConsent) {
+          if (localStorage.getItem("FLAG-meetsEligibilityCriteria") != "true") {
+            this.window.location.href = "/patient-registry/application-instructions/";
+          }
+          if (this.localStorage.getItem("FLAG-isConsentGiven") === "true") {
+            window.location.href = "/patient-registry/personal-info/";
+          }
+          const btn = document.getElementById("CONSENT-OpenFormButton-r001");
+          btn.addEventListener('click', function () {
+            window.open('/docs/Patient-Registry-Consent-Form.pdf', '_blank');
+          });
+        }
+        if (name == "Personal Information" || name == "Health Information") {
+          if (this.localStorage.getItem("FLAG-isConsentGiven") == undefined) {
+            this.window.location.href = "/patient-registry/consent/";
+          } else if (this.localStorage.getItem("FLAG-meetsEligibilityCriteria") == false) {
+            this.window.location.href = "/patient-registry/submission-state/";
+          } else if (this.localStorage.getItem("FLAG-meetsEligibilityCriteria") == undefined) {
+            this.window.location.href = "/patient-registry/application-instructions/";
+          }
+        }
+
+        // 3) Loads .json with active page & pulls values -----------------------------
+        fetch(contentDictionary[activeQuestionnairePage]).then(response => {
+          return response.json();
+        }).then(response => {
+          response.items.forEach(item => {
+            if (item.templateName != "flexItemBreak" && item.templateName != "subsectionBreak") {
+              loadItemValue(item);
+              if (validators[item.id] == checkPhone) {
+                formatPhoneNumber(document.getElementById(item.id));
+              }
+            }
+          });
+        }).then(response => {
+          questionnaireContent = response.items;
+        }).catch(error => error);
+
+        // Adds event listener to send user to next input line if they hit enter -----------------------------
+        document.querySelectorAll('form').forEach(form => {
+          if (form.name === "mc-embedded-subscribe-form") {
+            return;
+          }
+          form.addEventListener("keydown", e => {
+            if (e.key == "Enter") {
+              e.preventDefault();
+              const form = e.target.closest('form');
+              ;
+              const index = [...form].indexOf(e.target);
+              if (form.elements[index + 1] != undefined || form.elements[index + 1] != null) {
+                form.elements[index + 1].focus();
+              }
+            }
+          });
+          form.addEventListener('focusin', e => {
+            e.preventDefault();
+            if (validators[e.target.id] == checkPhone && e.target.value != "") {
+              removePhoneNumberFormatting(e.target);
+            }
+          });
+          form.addEventListener('focusout', e => {
+            e.preventDefault();
+            if (validators[e.target.id] == checkPhone && e.target.value != "") {
+              formatPhoneNumber(e.target);
+            }
+          });
+          form.addEventListener('change', e => {
+            e.preventDefault();
+            let eventTarget = e.target.id;
+            saveItemValue(e.target);
+
+            // Adding date / time autofill to specific fields without user prompt
+            if (eventTarget == "SIGNATURE-RecordReleaseSignature-r001") {
+              // this part auto-fills the final signature fields
+              let finalSigDateElement = document.getElementById("SIGNATURE-RecordReleaseDate-r001");
+              let finalSigtimeElement = document.getElementById("SIGNATURE-RecordReleaseTime-r001");
+              const d = new Date();
+
+              //formats the date into the same format as local storage
+              const date = [d.getFullYear(), ('0' + (d.getMonth() + 1)).slice(-2), ('0' + d.getDate()).slice(-2)].join('-');
+              finalSigDateElement.value = date;
+              finalSigtimeElement.value = new Date().toLocaleTimeString(navigator.language, {
+                hour: '2-digit',
+                minute: '2-digit'
+              });
+              saveItemValue(document.getElementById("SIGNATURE-RecordReleaseDate-r001"));
+              saveItemValue(document.getElementById("SIGNATURE-RecordReleaseTime-r001"));
+            } else if (eventTarget == "SIGNATURE-ConsentSignature-r001") {
+              // this part auto-fills the informed consent signature fields
+
+              let sigDateElement = document.getElementById("SIGNATURE-ConsentDate-r001");
+              let sigtimeElement = document.getElementById("SIGNATURE-ConsentTime-r001");
+              const d = new Date();
+
+              //formats the date into the same format as local storage
+              const date = [d.getFullYear(), ('0' + (d.getMonth() + 1)).slice(-2), ('0' + d.getDate()).slice(-2)].join('-');
+              sigDateElement.value = date;
+              sigtimeElement.value = new Date().toLocaleTimeString(navigator.language, {
+                hour: '2-digit',
+                minute: '2-digit'
+              });
+              saveItemValue(document.getElementById("SIGNATURE-ConsentDate-r001"));
+              saveItemValue(document.getElementById("SIGNATURE-ConsentTime-r001"));
+            }
+          });
+          form.addEventListener('submit', e => {
+            e.preventDefault();
+            let pageBody = getPageBody(contentDictionary[activeQuestionnairePage]);
+            validateInput(pageBody);
+          });
+        });
+      } else if (document.getElementsByClassName("submissionState").length > 0) {
+        const submissionSuccess = localStorage.getItem("FLAG-submissionSuccess");
+        if (submissionSuccess == "true") {
+          updateSubmissionStateText("Your application has been submitted.", "Your information has been added to Neuralink’s Patient Registry! If you did not opt out of being contacted by Neuralink for future Neuralink clinical trials, someone from Neuralink and/or a third party sponsored by Neuralink may contact you (or, if applicable, your legally authorized representative). Thank you for sharing your information with us.");
+        } else if (submissionSuccess == "false") {
+          // submission API failure
+          updateSubmissionStateText("Application submission failed.", "Submission failures could be caused by invalid requests or server errors. Please click <a href=\"/patient-registry/submission-approval/\">this link</a> to retry later.");
+        } else if (localStorage.getItem("FLAG-meetsEligibilityCriteria") === "false" || localStorage.getItem("FLAG-isConsentGiven") === "false") {
+          updateSubmissionStateText("Unfortunately, your application cannot be submitted at this time.", "This can occur because: you indicated that you are under 18 years of age, you might be accessing the Patient Registry from outside the United States, or using a virtual private network (VPN), you indicated that you did not have one of the conditions required for participating in this Patient Registry, or the server may have encountered a problem.");
+        } else {
+          // Route user to application instructions, they shouldn't be on this page.
+          window.location.href = "/patient-registry/application-instructions/";
+        }
+      } else if (window.location.pathname === "/patient-registry/submission-approval/") {
+        const submitBtn = document.getElementById("submit-application-button");
+        submitBtn.onclick = submitApplication;
+      } else if (document.getElementsByClassName("submissionTesting").length > 0) {
+        postApplication();
+      }
+    });
+  };
+  return init();
+}
+var renderCaptcha = function () {
+  const element = document.getElementById('recaptcha');
+  if (element != null) {
+    grecaptcha.render(element, {
+      'sitekey': '6LfBAMwiAAAAAJTsyQ5H_tQF2MEI7P1U6mxojL1d'
+    });
+  }
+};
+
+/**
+ * Initialize Registry object on load.
+ */
+
+window.addEventListener('load', new Registry());;

@@ -1,0 +1,391 @@
+"use strict";
+
+/**
+ * @constructor App
+ *
+ * These are helper functions that are used throughout the entire website.
+ *
+ * @returns {function} init() Our initialization function
+ */
+function App() {
+  /**
+   * @function careers
+   *
+   * Get the careers from Greenhouse
+   */
+  const careers = function () {
+    const request = new Request('https://boards-api.greenhouse.io/v1/boards/neuralink/jobs?content=true');
+    fetch(request).then(response => response.json()).then(response => {
+      // Element were we are going to put everything
+      const careersListEl = document.querySelector('.careers.container');
+
+      // Array -> Set -> Array | Sets by definition don't have duplicates
+      const removeDuplicates = xs => Array.from(new Set(xs));
+
+      // Get a unique and flat list of departments
+      // Note that jobs can be listed with multiple departments according to the Greenhouse API
+      const allDepartments = removeDuplicates(response.jobs.map(job => job.departments.map(x => x.name)).flat());
+
+      // Ordered list of departments
+      const orderedDepartments = ['Brain Interfaces', 'Clinical', 'Finance', 'General', 'Internships', 'I.T.', 'Machine Shop', 'Operations', 'Quality Systems', 'Recruiting', 'Research Services', 'Software', 'Surgery & Robotics'];
+      const departments = orderedDepartments.concat(allDepartments.filter(department => !orderedDepartments.includes(department)));
+      const jobsByDepartment = departments.map(department => {
+        const departmentJobs = response.jobs.filter(job => job.departments.find(x => x.name == department));
+
+        // We have separate Greenhouse reqs for the same role across multiple locations, this
+        // allows us to consolidate and display one req for both locations
+        const consolidatedJobReqs = {};
+
+        // We only want one job req to show up regardless of which locations we're hiring for!
+        for (const job of departmentJobs) {
+          if (!Object.keys(consolidatedJobReqs).includes(job.title)) {
+            consolidatedJobReqs[job.title] = {
+              title: job.title
+            };
+          }
+          if (job.location.name.includes("Austin")) {
+            consolidatedJobReqs[job.title].austin_url = job.absolute_url;
+          } else {
+            consolidatedJobReqs[job.title].fremont_url = job.absolute_url;
+          }
+        }
+        return {
+          name: department,
+          jobs: Object.values(consolidatedJobReqs)
+        };
+      });
+
+      // This is the "Apply in <Location> =>" icon on the right side of the page
+      const generateApplyCallToAction = function (url, location_name) {
+        return `<div class="careers-item-cta button -cta -color-dark" >
+              <a href="${url}" target="_blank" >Apply in ${location_name}
+              <span class="arrowPacman">
+                <span class="arrowPacman-clip">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M7.10081 0L5.88245 1.23617L10.7016 6.12576H0V7.87423H10.7016L5.88245 12.7638L7.10081 14L14 7L7.10081 0Z" fill="white"></path>
+                  </svg>
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M7.10081 0L5.88245 1.23617L10.7016 6.12576H0V7.87423H10.7016L5.88245 12.7638L7.10081 14L14 7L7.10081 0Z" fill="white"></path>
+                  </svg>
+                </span>
+              </span>
+              </a>
+            </div>`;
+      };
+
+      // Job listing template
+      const jobHTMLBlock = job => `
+          <div class="careers-item">
+            <div class="careers-item-description">
+              <h3 class="careers-item-headline">${job.title}</h3>
+              <p class="careers-item-meta">
+                ${job.austin_url != null ? `<a href="${job.austin_url}" target="_blank" >Austin, Texas</a>` : ""}
+                ${job.austin_url != null && job.fremont_url != null ? " | " : ""}
+                ${job.fremont_url != null ? `<a href="${job.fremont_url}" target="_blank" >Fremont, California</a>` : ""}
+              </p>
+            </div>
+            <div class="careers-item-apply-links">
+              ${job.austin_url != null ? generateApplyCallToAction(job.austin_url, "Austin") : ""}
+              ${job.fremont_url != null ? generateApplyCallToAction(job.fremont_url, "Fremont") : ""}
+            </div>
+          </div>
+        `;
+
+      // Job department template
+      const departmentHTMLBlock = department => `
+          <div class="careers-department">
+            <h2 class="careers-department-headline _top-border-headline">${department.name}</h2>
+
+            ${department.jobs.reduce((listing, job) => listing + jobHTMLBlock(job), '')}
+          </div>
+        `;
+
+      // Insert all the departments in the page,
+      // each department will have its list of jobs populated
+      jobsByDepartment.forEach(department => {
+        if (department.jobs.length > 0) {
+          careersListEl.insertAdjacentHTML('beforeend', departmentHTMLBlock(department));
+        }
+      });
+    });
+  };
+
+  /**
+   * @function mobileNavigation
+   *
+   * Mobile navigation for the global header
+   */
+  const mobileNavigation = function () {
+    const hamburger = document.querySelector('.hamburger');
+    const header = document.querySelector('.globalHeader');
+    if (!hamburger || !header) return;
+    hamburger.addEventListener('click', function (event) {
+      const isMobile = window.matchMedia('(max-width: 768px)').matches;
+      if (isMobile) {
+        event.preventDefault();
+        hamburger.classList.toggle('-active');
+        hamburger.setAttribute("aria-expanded", true);
+        document.documentElement.classList.toggle('-no-scroll');
+        header.classList.toggle('-activeNav');
+      }
+    });
+
+    // Close the nav when the window changes its size
+    window.addEventListener('resize', function () {
+      hamburger.classList.remove('-active');
+      hamburger.setAttribute("aria-expanded", false);
+      header.classList.remove('-activeNav');
+      document.documentElement.classList.remove('-no-scroll');
+    });
+  };
+
+  /**
+   * @function accordion()
+   *
+   * Accordion component used throughout the site
+   */
+
+  const accordion = function () {
+    const items = document.querySelectorAll('.accordion-item');
+    const active = '-active';
+
+    //
+    function accordionInteract(element) {
+      if (element.classList.contains(active)) {
+        element.classList.remove(active);
+        element.setAttribute("aria-expanded", "false");
+      } else {
+        const currentlySelected = document.querySelector('.accordion-item.' + active);
+        currentlySelected && currentlySelected.classList.remove(active);
+        element.classList.add(active);
+        element.setAttribute("aria-expanded", "true");
+      }
+    }
+    if (!items) return;
+    items.forEach(item => {
+      item.addEventListener('click', function () {
+        accordionInteract(item);
+      });
+
+      // adding a custom event listener for the space key to make it
+      // accessible to interact with the accordion from a keyboard alone
+      item.addEventListener('keydown', e => {
+        if (e.code == "Space") {
+          e.preventDefault();
+          accordionInteract(item);
+        }
+      });
+    });
+  };
+
+  /**
+   * @function videoPopup()
+   *
+   * Displays popup video on the Science page
+   */
+  const videoPopup = function () {
+    const popupLinks = document.querySelectorAll('.-openPopup');
+    if (popupLinks.length == 0) {
+      return;
+    }
+    const popup = document.querySelector('.popupVideo');
+    const videoElement = document.querySelector('.popupVideo video');
+    const popupVideoElement = document.querySelector('.popupVideo source');
+    const active = '-visible';
+    if (!popupLinks) return;
+    popupLinks.forEach(link => {
+      link.addEventListener('click', function (e) {
+        e.preventDefault();
+        const videoFile = link.getAttribute('href');
+        popupVideoElement.src = videoFile;
+        videoElement.load();
+        videoElement.play();
+        popup.classList.add(active);
+      });
+    });
+    document.querySelector('.popupVideo-close').addEventListener('click', function () {
+      popup.classList.remove(active);
+      videoElement.pause();
+    });
+  };
+
+  /**
+   * @function brain()
+   *
+   * Brain interactions for the Applications page
+   */
+  const brain = function () {
+    const element = '[data-brain-hover]';
+    const triggers = document.querySelectorAll(element);
+    const checkIfDesktop = window.matchMedia('(min-width: 768px)');
+    const hoverInteraction = function () {
+      triggers.forEach(function (trigger) {
+        // Show highlight when mouse enters
+        trigger.addEventListener('mouseover', function (event) {
+          var target = event.target.closest(element).dataset.brainHover;
+          var highlight = document.querySelectorAll(`svg [data-name="${target}"] image`);
+          highlight.forEach(el => el.style.opacity = 1);
+        });
+
+        // Remove highlight when mouse leaves
+        trigger.addEventListener('mouseout', function (event) {
+          var target = event.target.closest(element).dataset.brainHover;
+          var highlight = document.querySelectorAll(`svg [data-name="${target}"] image`);
+          highlight.forEach(el => el.style.opacity = 0);
+        });
+      });
+    };
+    const clickInteraction = function () {
+      triggers.forEach(function (trigger) {
+        // Show/hide highlight when clicking
+        trigger.addEventListener('click', function (event) {
+          const targetRegionName = event.target.closest(element).dataset.brainHover;
+          const targetRegionImage = document.querySelector(`svg [data-name="${targetRegionName}"] image`);
+          const currentlySelectedRegion = document.querySelector('.applicationsTwo-brains image.-active');
+
+          // Check if the region we are selecting is already active
+          if (targetRegionImage.classList.contains('-active')) {
+            // Deactivate previously selected region
+            targetRegionImage.classList.remove('-active');
+          } else {
+            // Deactivate any other previously selected region if there is one
+            currentlySelectedRegion && currentlySelectedRegion.classList.remove('-active');
+
+            // Activate new selected region
+            targetRegionImage.classList.add('-active');
+          }
+        });
+      });
+    };
+
+    // Initial
+    if (triggers) {
+      if (checkIfDesktop.matches) hoverInteraction();else clickInteraction();
+    }
+
+    // Update interaction type when we change from desktop to mobile size and viceversa
+    checkIfDesktop.onchange = () => {
+      if (triggers) {
+        if (checkIfDesktop.matches) hoverInteraction();else clickInteraction();
+      }
+    };
+  };
+
+  /**
+   * @function lazy()
+   *
+   * Lazy loading for image and video assets across the site
+   */
+  const lazy = function () {
+    const lazyImages = [].slice.call(document.querySelectorAll("img.lazy"));
+    const lazyVideos = [].slice.call(document.querySelectorAll("video.lazy"));
+    const IntersectionObserverOptions = {
+      rootMargin: "1000px" // Trigger 1000px ahead
+    };
+
+    if ("IntersectionObserver" in window) {
+      const lazyMediaObserver = new IntersectionObserver(function (entries, observer) {
+        entries.forEach(function (entry) {
+          if (entry.isIntersecting) {
+            const lazyMedia = entry.target;
+
+            // Check if the element is a video or an image
+            if (entry.target.localName == 'video') {
+              const source = Array.from(entry.target.children).filter(x => x.localName === "source")[0];
+              source.src = source.dataset.src;
+              lazyMedia.load();
+              lazyMedia.play();
+            } else {
+              lazyMedia.src = lazyMedia.dataset.src;
+              // NOTE: Uncomment when adding srcsets
+              // lazyMedia.srcset = lazyMedia.dataset.srcset;
+            }
+
+            lazyMedia.classList.remove("lazy");
+            lazyMediaObserver.unobserve(lazyMedia);
+          }
+        });
+      }, IntersectionObserverOptions);
+      lazyImages.forEach(function (lazyImage) {
+        lazyMediaObserver.observe(lazyImage);
+      });
+      lazyVideos.forEach(function (lazyVideo) {
+        lazyMediaObserver.observe(lazyVideo);
+      });
+    }
+  };
+
+  /**
+   * @function science()
+   *
+   * Handles interactivity for the Science page
+   */
+  const science = function () {
+    // Sets the height of the science section to match the height of the SVG
+    function setHeight() {
+      let illoVisible = window.matchMedia('(min-width: 1260px)').matches;
+      let science = document.querySelector('.science');
+      let scienceIllo = document.querySelector('.science svg').clientHeight;
+      if (illoVisible) {
+        science.style.height = `${scienceIllo + 200}px`;
+      } else {
+        science.style.height = 'initial';
+      }
+    }
+
+    // Displays tooltips when parts of the science illustration are hovered over
+    function tooltips() {
+      const triggers = document.querySelectorAll('[data-target]');
+      var figs = document.querySelectorAll('.fig');
+      var active = '-visible';
+      triggers.forEach(function (trigger) {
+        trigger.addEventListener('mouseover', function (event) {
+          var target = event.target;
+          var element = target.dataset.target;
+          var selector = `[id^="${element}-"]`;
+          var elements = document.querySelectorAll(selector);
+          elements.forEach(el => el.classList.add(active));
+        });
+        trigger.addEventListener('mouseout', function () {
+          var target = event.target;
+          var element = target.dataset.target;
+          var selector = `[id^="${element}-"]`;
+          var elements = document.querySelectorAll(selector);
+          elements.forEach(el => el.classList.remove(active));
+        });
+      });
+    }
+    function init() {
+      window.onload = setHeight;
+      window.onresize = setHeight;
+      window.onload = tooltips;
+    }
+    return init();
+  };
+
+  /**
+   * @function init
+   *
+   * Initializes all of our helper functions for our app
+   */
+  const init = function () {
+    window.addEventListener('load', function () {
+      lazy();
+      const path = window.location.pathname;
+      mobileNavigation();
+      accordion();
+      videoPopup();
+      brain();
+      //science(); // Looks like the science function is not being used currently
+      if (path.startsWith('/careers/')) {
+        careers();
+      }
+    });
+  };
+  return init();
+}
+
+/**
+ * Initialize after page loads
+ */
+window.addEventListener('load', new App());;
